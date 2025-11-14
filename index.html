@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en" class=""><head><script>window.livecodes = window.livecodes || {};</script><title>School attendance </title><meta name="title" content="School attendance "><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="stylesheet" href="./style.css"><script src="https://cdn.jsdelivr.net/npm/es-module-shims@1.10.0/dist/es-module-shims.js" async=""></script><script type="importmap">{
+  "imports": {}
+}</script></head><body>
+
+
+
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ARM Portal - Navrose Smart School</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.15.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.15.0/firebase-database-compat.js"></script>
+    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+        body { font-family: 'Plus Jakarta Sans', sans-serif; }
+        .form-input {
+            width: 100%; padding: 0.75rem; border: 1px solid #e5e7eb;
+            border-radius: 0.5rem; font-size: 1rem; background-color: #ffffff;
+        }
+        #toast {
+            position: fixed; bottom: 1.5rem; right: 1.5rem; background-color: #1f2937; color: white;
+            padding: 0.75rem 1.25rem; border-radius: 0.5rem; z-index: 1200; opacity: 0;
+            transition: opacity .3s ease, transform .3s ease; transform: translateY(20px);
+        }
+        #toast.show { opacity: 1; transform: translateY(0); }
+        #qr-reader { border: 2px solid #e5e7eb; border-radius: 0.5rem; }
+    </style>
+
+
+
+    <div id="login-overlay" class="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div class="w-full max-w-sm p-8 space-y-6 bg-white rounded-2xl shadow-lg">
+            <div class="text-center">
+                <h1 class="text-2xl font-bold">Vice Principal Portal</h1>
+                <p class="text-gray-500">Staff Attendance Login</p>
+            </div>
+            <form id="vp-login-form" class="space-y-4">
+                <div>
+                    <label for="vp-mobile" class="block text-sm font-medium text-gray-700">Mobile No.</label>
+                    <input type="tel" id="vp-mobile" class="form-input mt-1" required="">
+                </div>
+                <div>
+                    <label for="vp-password" class="block text-sm font-medium text-gray-700">Password</label>
+                    <input type="password" id="vp-password" class="form-input mt-1" required="">
+                </div>
+                <div class="pt-2">
+                     <button type="submit" class="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg">Login</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <main class="container mx-auto p-8 hidden">
+        <header class="flex justify-between items-center mb-8 bg-white p-4 rounded-xl shadow-sm">
+            <div>
+                <h1 class="text-3xl font-bold">Staff Attendance Scanner</h1>
+                <p id="vp-info" class="text-gray-600"></p>
+            </div>
+            <button id="logout-btn" class="py-2 px-4 bg-red-600 hover:bg-red-700 text-white font-semibold rounded-lg">Logout</button>
+        </header>
+
+        <div class="bg-white p-8 rounded-xl shadow-sm">
+            <div id="scanner-container" class="max-w-xl mx-auto text-center">
+                <div id="qr-reader" class="w-full"></div>
+                <div id="qr-reader-results" class="mt-4 font-semibold"></div>
+                <button id="start-scanner-btn" class="mt-4 w-full py-3 px-4 bg-green-600 hover:bg-green-700 text-white font-semibold rounded-lg">Start Scanner</button>
+            </div>
+        </div>
+    </main>
+    
+    <div id="toast"></div>
+
+<script>
+    const firebaseConfig = {
+        apiKey: "AIzaSyD7gB7FbMFtG1k1vJGVI3XVCyCUNeZIC7M",
+        databaseURL: "https://smart-school-e9f86-default-rtdb.asia-southeast1.firebasedatabase.app",
+    };
+
+    let db;
+    let vicePrincipal = null;
+    let allStaff = [];
+    let html5QrCode;
+
+    // --- UTILS ---
+    function showToast(message, isError = false) {
+        const t = document.getElementById('toast');
+        t.textContent = message;
+        t.style.backgroundColor = isError ? '#ef4444' : '#1f2937';
+        t.classList.add('show');
+        setTimeout(() => t.classList.remove('show'), 4000);
+    }
+
+    function logout() {
+        sessionStorage.removeItem('loggedInUser');
+        vicePrincipal = null;
+        allStaff = [];
+        if (html5QrCode && html5QrCode.isScanning) {
+            html5QrCode.stop().catch(err => console.error("Failed to stop scanner on logout.", err));
+        }
+        document.querySelector('main').classList.add('hidden');
+        document.getElementById('login-overlay').classList.remove('hidden');
+    }
+
+    // --- SCANNER LOGIC ---
+    function onScanSuccess(decodedText, decodedResult) {
+        const staffId = decodedText;
+        const staffMember = allStaff.find(s => s.id === staffId);
+        
+        if (staffMember) {
+            document.getElementById('qr-reader-results').textContent = `Scanned: ${staffMember.staffName}`;
+            markStaffAttendance(staffMember);
+        } else {
+            showToast(`QR Code invalid. Staff not found.`, true);
+        }
+    }
+
+    function onScanFailure(error) {
+        // This callback is called frequently, so we don't log anything to avoid console spam.
+    }
+
+    async function markStaffAttendance(staffMember) {
+        const today = new Date().toISOString().split('T')[0];
+        const checkInTime = new Date().toTimeString().slice(0, 5); // HH:MM format
+        const attendanceRef = db.ref(`teacherAttendance/${today}`);
+        
+        try {
+            const snapshot = await attendanceRef.once('value');
+            const todaysRecord = snapshot.val() || { id: today, date: today, attendance: {}, lastUpdated: '' };
+
+            if (todaysRecord.attendance[staffMember.id]?.checkIn) {
+                showToast(`${staffMember.staffName} already checked in at ${todaysRecord.attendance[staffMember.id].checkIn}.`);
+                return;
+            }
+
+            todaysRecord.attendance[staffMember.id] = {
+                ...todaysRecord.attendance[staffMember.id],
+                checkIn: checkInTime
+            };
+            todaysRecord.lastUpdated = new Date().toISOString();
+
+            await attendanceRef.set(todaysRecord);
+            showToast(`${staffMember.staffName} attendance marked at ${checkInTime}.`);
+        } catch (error) {
+            console.error("Error marking attendance:", error);
+            showToast("Failed to save attendance. Check connection.", true);
+        }
+    }
+
+    // --- APP FLOW ---
+    async function runApp(loggedInUser) {
+        document.getElementById('login-overlay').classList.add('hidden');
+        document.querySelector('main').classList.remove('hidden');
+
+        try {
+            const staffSnap = await db.ref('staff').once('value');
+            allStaff = Object.values(staffSnap.val() || {});
+            vicePrincipal = allStaff.find(s => s.id === loggedInUser.id);
+
+            if (!vicePrincipal) {
+                logout();
+                throw new Error("VP profile not found.");
+            }
+
+            document.getElementById('vp-info').textContent = `Logged in as ${vicePrincipal.staffName}`;
+            document.getElementById('logout-btn').addEventListener('click', logout);
+            
+            html5QrCode = new Html5Qrcode("qr-reader");
+            const startBtn = document.getElementById('start-scanner-btn');
+
+            startBtn.addEventListener('click', () => {
+                startBtn.disabled = true;
+                startBtn.textContent = 'Starting Camera...';
+                document.getElementById('qr-reader-results').textContent = 'Point camera at staff QR code.';
+                html5QrCode.start(
+                    { facingMode: "environment" },
+                    { fps: 10, qrbox: { width: 250, height: 250 } },
+                    onScanSuccess,
+                    onScanFailure
+                ).then(() => {
+                    startBtn.textContent = 'Scanner Active';
+                }).catch(err => {
+                    showToast('Failed to start scanner. Check camera permissions.', true);
+                    console.error("Scanner start error:", err);
+                    startBtn.disabled = false;
+                    startBtn.textContent = 'Start Scanner';
+                });
+            });
+
+        } catch (error) {
+            console.error("Failed to load data:", error);
+            showToast("Could not load required data.", true);
+        }
+    }
+    
+    // --- INITIALIZATION ---
+    document.addEventListener('DOMContentLoaded', () => {
+        if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+        db = firebase.database();
+
+        const form = document.getElementById('vp-login-form');
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const mobile = document.getElementById('vp-mobile').value;
+            const password = document.getElementById('vp-password').value;
+            const button = form.querySelector('button[type="submit"]');
+            button.disabled = true;
+            button.textContent = 'Verifying...';
+            
+            try {
+                const staffSnap = await db.ref('staff').once('value');
+                const allStaff = Object.values(staffSnap.val() || {});
+                const foundVP = allStaff.find(s => s.mobile === mobile && s.password === password && s.role.toLowerCase().includes('vice principal'));
+                
+                if (foundVP) {
+                    const user = { role: 'vp', id: foundVP.id };
+                    sessionStorage.setItem('loggedInUser', JSON.stringify(user));
+                    runApp(user);
+                } else {
+                    showToast('Invalid credentials or not a VP account.', true);
+                }
+            } catch (err) {
+                showToast('Login failed. Check connection.', true);
+                console.error(err);
+            } finally {
+                button.disabled = false;
+                button.textContent = 'Login';
+            }
+        });
+
+        let loggedInUser = null;
+        try {
+            const userData = sessionStorage.getItem('loggedInUser');
+            if (userData) loggedInUser = JSON.parse(userData);
+        } catch (e) {
+            sessionStorage.removeItem('loggedInUser');
+        }
+        
+        if (loggedInUser && loggedInUser.role === 'vp') {
+            runApp(loggedInUser);
+        } else {
+            // Already showing login by default
+        }
+    });
+
+</script>
+
+
+<script src="./script.js"></script></body></html>
