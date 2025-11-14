@@ -17,7 +17,7 @@
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; }
-        .form-input {
+        .form-input, .form-select {
             width: 100%; padding: 0.75rem; border: 1px solid #e5e7eb;
             border-radius: 0.5rem; font-size: 1rem; background-color: #ffffff;
         }
@@ -28,6 +28,29 @@
         }
         #toast.show { opacity: 1; transform: translateY(0); }
         #qr-reader { border: 2px solid #e5e7eb; border-radius: 0.5rem; }
+        .modal {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background-color: rgba(0,0,0,0.5); display: none;
+            justify-content: center; align-items: center; z-index: 1000;
+        }
+        .modal.active { display: flex; }
+        .tab-button {
+            cursor: pointer;
+            padding: 1rem 0.25rem;
+            border-bottom: 2px solid transparent;
+            color: #6b7280; /* text-gray-500 */
+            font-weight: 500;
+            font-size: 0.875rem; /* text-sm */
+            white-space: nowrap;
+        }
+        .tab-button:hover {
+            border-bottom-color: #d1d5db; /* border-gray-300 */
+            color: #374151; /* text-gray-700 */
+        }
+        .tab-button.active {
+            border-bottom-color: #4f46e5; /* border-indigo-500 */
+            color: #4f46e5; /* text-indigo-600 */
+        }
     </style>
 
 
@@ -57,22 +80,43 @@
     <main class="container mx-auto p-8 hidden">
         <header class="flex justify-between items-center mb-8 bg-white p-4 rounded-xl shadow-sm">
             <div>
-                <h1 class="text-3xl font-bold">Staff Attendance Scanner</h1>
+                <h1 class="text-3xl font-bold">Staff Attendance</h1>
                 <p id="vp-info" class="text-gray-600"></p>
             </div>
             <button id="logout-btn" class="py-2 px-4 bg-red-600 hover:bg-red-700 text-white font-semibold rounded-lg">Logout</button>
         </header>
 
         <div class="bg-white p-8 rounded-xl shadow-sm">
-            <div id="scanner-container" class="max-w-xl mx-auto text-center">
-                <div id="qr-reader" class="w-full"></div>
-                <div id="qr-reader-results" class="mt-4 font-semibold"></div>
-                <button id="start-scanner-btn" class="mt-4 w-full py-3 px-4 bg-green-600 hover:bg-green-700 text-white font-semibold rounded-lg">Start Scanner</button>
+            <div class="border-b border-gray-200">
+                <nav class="-mb-px flex space-x-8" aria-label="Tabs">
+                    <button class="tab-button active" data-tab="scanner">QR Scanner</button>
+                    <button class="tab-button" data-tab="live">Live Register (Today)</button>
+                    <button class="tab-button" data-tab="monthly">Monthly Register</button>
+                </nav>
+            </div>
+            <div id="tab-content" class="mt-6">
+                <!-- Content will be injected here -->
             </div>
         </div>
     </main>
     
     <div id="toast"></div>
+
+    <!-- Scan Success Modal -->
+    <div id="scan-success-modal" class="modal">
+        <div class="bg-white p-8 rounded-2xl shadow-lg text-center max-w-sm w-full">
+            <div class="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-green-100 mb-4">
+                <svg class="h-10 w-10 text-green-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"></path>
+                </svg>
+            </div>
+            <h3 class="text-2xl font-bold mb-2">Welcome!</h3>
+            <p id="scan-success-name" class="text-gray-700 text-lg"></p>
+        </div>
+    </div>
+
+    <audio id="scan-success-sound" src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg" preload="auto"></audio>
+
 
 <script>
     const firebaseConfig = {
@@ -83,7 +127,9 @@
     let db;
     let vicePrincipal = null;
     let allStaff = [];
+    let teacherAttendanceRecords = [];
     let html5QrCode;
+    let activeDBListener = null;
 
     // --- UTILS ---
     function showToast(message, isError = false) {
@@ -98,12 +144,34 @@
         sessionStorage.removeItem('loggedInUser');
         vicePrincipal = null;
         allStaff = [];
+        teacherAttendanceRecords = [];
+        if (activeDBListener) {
+            activeDBListener.ref.off('value', activeDBListener.callback);
+            activeDBListener = null;
+        }
         if (html5QrCode && html5QrCode.isScanning) {
             html5QrCode.stop().catch(err => console.error("Failed to stop scanner on logout.", err));
         }
         document.querySelector('main').classList.add('hidden');
         document.getElementById('login-overlay').classList.remove('hidden');
     }
+
+    function showScanConfirmation(name) {
+        const modal = document.getElementById('scan-success-modal');
+        const nameEl = document.getElementById('scan-success-name');
+        const sound = document.getElementById('scan-success-sound');
+
+        if (modal && nameEl && sound) {
+            nameEl.textContent = name;
+            modal.classList.add('active');
+            sound.play().catch(e => console.error("Audio play failed:", e));
+
+            setTimeout(() => {
+                modal.classList.remove('active');
+            }, 2500);
+        }
+    }
+
 
     // --- SCANNER LOGIC ---
     function onScanSuccess(decodedText, decodedResult) {
@@ -136,6 +204,8 @@
                 return;
             }
 
+            showScanConfirmation(staffMember.staffName);
+
             todaysRecord.attendance[staffMember.id] = {
                 ...todaysRecord.attendance[staffMember.id],
                 checkIn: checkInTime
@@ -143,21 +213,177 @@
             todaysRecord.lastUpdated = new Date().toISOString();
 
             await attendanceRef.set(todaysRecord);
-            showToast(`${staffMember.staffName} attendance marked at ${checkInTime}.`);
         } catch (error) {
             console.error("Error marking attendance:", error);
             showToast("Failed to save attendance. Check connection.", true);
         }
     }
 
+    // --- TAB RENDERING ---
+    function renderScanner() {
+        const container = document.getElementById('tab-content');
+        container.innerHTML = `
+            <div id="scanner-container" class="max-w-xl mx-auto text-center">
+                <div id="qr-reader" class="w-full"></div>
+                <div id="qr-reader-results" class="mt-4 font-semibold"></div>
+                <button id="start-scanner-btn" class="mt-4 w-full py-3 px-4 bg-green-600 hover:bg-green-700 text-white font-semibold rounded-lg">Start Scanner</button>
+            </div>
+        `;
+        
+        html5QrCode = new Html5Qrcode("qr-reader");
+        const startBtn = document.getElementById('start-scanner-btn');
+
+        startBtn.addEventListener('click', () => {
+            startBtn.disabled = true;
+            startBtn.textContent = 'Starting Camera...';
+            document.getElementById('qr-reader-results').textContent = 'Point camera at staff QR code.';
+            html5QrCode.start(
+                { facingMode: "environment" },
+                { fps: 10, qrbox: { width: 250, height: 250 } },
+                onScanSuccess,
+                onScanFailure
+            ).then(() => {
+                startBtn.textContent = 'Scanner Active';
+            }).catch(err => {
+                showToast('Failed to start scanner. Check camera permissions.', true);
+                console.error("Scanner start error:", err);
+                startBtn.disabled = false;
+                startBtn.textContent = 'Start Scanner';
+            });
+        });
+    }
+
+    function renderLiveRegister() {
+        const container = document.getElementById('tab-content');
+        container.innerHTML = `<div id="live-register-list" class="space-y-3"></div>`;
+        const listContainer = document.getElementById('live-register-list');
+
+        const today = new Date().toISOString().split('T')[0];
+        const todaysAttendanceRef = db.ref(`teacherAttendance/${today}`);
+        
+        if (activeDBListener) {
+            activeDBListener.ref.off('value', activeDBListener.callback);
+        }
+
+        const listenerCallback = snapshot => {
+            const todaysRecord = snapshot.val();
+            const attendanceData = todaysRecord ? todaysRecord.attendance : {};
+            
+            listContainer.innerHTML = allStaff.map(staff => {
+                const staffAttendance = attendanceData[staff.id];
+                const hasCheckedIn = staffAttendance && staffAttendance.checkIn;
+                
+                return `
+                    <div class="p-4 border rounded-lg flex justify-between items-center ${hasCheckedIn ? 'bg-green-50' : 'bg-gray-50'}">
+                        <div>
+                            <p class="font-bold">${staff.staffName}</p>
+                            <p class="text-sm text-gray-500">${staff.role}</p>
+                        </div>
+                        ${hasCheckedIn ? `
+                        <div class="text-right">
+                            <p class="font-semibold text-green-700">Checked In</p>
+                            <p class="text-sm text-gray-600">at ${staffAttendance.checkIn}</p>
+                        </div>
+                        ` : `
+                        <p class="font-semibold text-red-600">Absent</p>
+                        `}
+                    </div>
+                `;
+            }).join('');
+        };
+
+        todaysAttendanceRef.on('value', listenerCallback);
+        activeDBListener = { ref: todaysAttendanceRef, callback: listenerCallback };
+    }
+    
+    function renderMonthlyRegister() {
+        const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM
+        const container = document.getElementById('tab-content');
+        container.innerHTML = `
+            <div class="flex items-center gap-4 mb-4">
+                <label for="register-month" class="font-medium">Select Month:</label>
+                <input type="month" id="register-month" class="form-input w-48" value="${currentMonth}">
+            </div>
+            <div id="monthly-register-container" class="overflow-x-auto"></div>
+        `;
+        document.getElementById('register-month').addEventListener('change', renderMonthlyRegisterSheet);
+        renderMonthlyRegisterSheet();
+    }
+    
+    function renderMonthlyRegisterSheet() {
+        const monthValue = document.getElementById('register-month').value;
+        const container = document.getElementById('monthly-register-container');
+        if (!monthValue) return;
+
+        const [year, month] = monthValue.split('-').map(Number);
+        const daysInMonth = new Date(year, month, 0).getDate();
+        
+        let headerHtml = '<tr><th class="p-2 border sticky left-0 bg-gray-100 z-10">Staff Name</th>';
+        for (let day = 1; day <= daysInMonth; day++) {
+            headerHtml += `<th class="p-2 border text-center text-xs w-10">${day}</th>`;
+        }
+        headerHtml += '</tr>';
+
+        const recordsForMonth = teacherAttendanceRecords.filter(r => r.date && r.date.startsWith(monthValue));
+        const recordsMap = new Map(recordsForMonth.map(r => [r.date, r.attendance]));
+        
+        let bodyHtml = allStaff.map(staff => {
+            let rowHtml = `<tr><td class="p-2 border font-semibold sticky left-0 bg-white z-10 whitespace-nowrap">${staff.staffName}</td>`;
+            for (let day = 1; day <= daysInMonth; day++) {
+                const dateStr = `${monthValue}-${String(day).padStart(2, '0')}`;
+                const attendance = recordsMap.get(dateStr);
+                const staffStatus = attendance ? attendance[staff.id] : null;
+                
+                let statusChar = '-';
+                let statusColor = '';
+                if (staffStatus) {
+                    if (staffStatus.status === 'Leave') { statusChar = 'L'; statusColor = 'bg-yellow-200 text-yellow-800';}
+                    else if (staffStatus.status === 'Absent') { statusChar = 'A'; statusColor = 'bg-red-200 text-red-800';}
+                    else if (staffStatus.checkIn) { statusChar = 'P'; statusColor = 'bg-green-200 text-green-800'; }
+                    else { statusChar = 'A'; statusColor = 'bg-red-200 text-red-800'; }
+                }
+                rowHtml += `<td class="p-2 border text-center font-bold text-xs ${statusColor}">${statusChar}</td>`;
+            }
+            rowHtml += '</tr>';
+            return rowHtml;
+        }).join('');
+        
+        container.innerHTML = `<table class="w-full text-sm border-collapse">${headerHtml}${bodyHtml}</table>`;
+    }
+
     // --- APP FLOW ---
+    function setActiveTab(tabName) {
+         if (html5QrCode && html5QrCode.isScanning) {
+            html5QrCode.stop().catch(err => console.error("Failed to stop scanner on tab change.", err));
+        }
+         if (activeDBListener && tabName !== 'live') {
+            activeDBListener.ref.off('value', activeDBListener.callback);
+            activeDBListener = null;
+        }
+
+        document.querySelectorAll('.tab-button').forEach(b => b.classList.toggle('active', b.dataset.tab === tabName));
+        
+        const renderFunction = {
+            scanner: renderScanner,
+            live: renderLiveRegister,
+            monthly: renderMonthlyRegister,
+        }[tabName];
+
+        if(renderFunction) renderFunction();
+    }
+
     async function runApp(loggedInUser) {
         document.getElementById('login-overlay').classList.add('hidden');
         document.querySelector('main').classList.remove('hidden');
 
         try {
-            const staffSnap = await db.ref('staff').once('value');
+            const [staffSnap, attendanceSnap] = await Promise.all([
+                db.ref('staff').once('value'),
+                db.ref('teacherAttendance').once('value')
+            ]);
+            
             allStaff = Object.values(staffSnap.val() || {});
+            teacherAttendanceRecords = Object.values(attendanceSnap.val() || {});
             vicePrincipal = allStaff.find(s => s.id === loggedInUser.id);
 
             if (!vicePrincipal) {
@@ -168,27 +394,11 @@
             document.getElementById('vp-info').textContent = `Logged in as ${vicePrincipal.staffName}`;
             document.getElementById('logout-btn').addEventListener('click', logout);
             
-            html5QrCode = new Html5Qrcode("qr-reader");
-            const startBtn = document.getElementById('start-scanner-btn');
-
-            startBtn.addEventListener('click', () => {
-                startBtn.disabled = true;
-                startBtn.textContent = 'Starting Camera...';
-                document.getElementById('qr-reader-results').textContent = 'Point camera at staff QR code.';
-                html5QrCode.start(
-                    { facingMode: "environment" },
-                    { fps: 10, qrbox: { width: 250, height: 250 } },
-                    onScanSuccess,
-                    onScanFailure
-                ).then(() => {
-                    startBtn.textContent = 'Scanner Active';
-                }).catch(err => {
-                    showToast('Failed to start scanner. Check camera permissions.', true);
-                    console.error("Scanner start error:", err);
-                    startBtn.disabled = false;
-                    startBtn.textContent = 'Start Scanner';
-                });
+            document.querySelectorAll('.tab-button').forEach(btn => {
+                btn.addEventListener('click', () => setActiveTab(btn.dataset.tab));
             });
+
+            setActiveTab('scanner');
 
         } catch (error) {
             console.error("Failed to load data:", error);
@@ -212,8 +422,8 @@
             
             try {
                 const staffSnap = await db.ref('staff').once('value');
-                const allStaff = Object.values(staffSnap.val() || {});
-                const foundVP = allStaff.find(s => s.mobile === mobile && s.password === password && s.role.toLowerCase().includes('vice principal'));
+                const staffData = Object.values(staffSnap.val() || {});
+                const foundVP = staffData.find(s => s.mobile === mobile && s.password === password && s.role.toLowerCase().includes('vice principal'));
                 
                 if (foundVP) {
                     const user = { role: 'vp', id: foundVP.id };
@@ -242,7 +452,7 @@
         if (loggedInUser && loggedInUser.role === 'vp') {
             runApp(loggedInUser);
         } else {
-            // Already showing login by default
+            document.getElementById('login-overlay').classList.remove('hidden');
         }
     });
 
